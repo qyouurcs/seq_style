@@ -17,11 +17,6 @@ from lasagne.utils import floatX
 
 from data_provider import *
 
-from pycocotools.coco import COCO
-from pycocoevalcap.eval import COCOEvalCap
-
-
-
 logging = climate.get_logger(__name__)
 climate.enable_default_logging()
 
@@ -32,7 +27,6 @@ def coco_eval(ann_fn, json_fn, save_fn):
     # comment below line to evaluate the full validation or testing set. 
     coco_evaluator.params['image_id'] = coco_res.getImgIds()
     coco_evaluator.evaluate(save_fn)
-
 
 def load_vocab(vocab_fn):
     idx2word = {}
@@ -62,7 +56,7 @@ def load_vocab_fea(word_vec_fn):
     word2vec_fea['#START#'] = start_fea
     return word2vec_fea, t_num_fea
 
-def predict_captions_forward_batch_glove(img_fea, word2vec_fea, idx2word, batch_size, beam_size = 20, t_fea_num = 300):
+def predict_captions_forward_batch_glove(img_fea, word2vec_fea, word2vec_fea_np, idx2word, batch_size, beam_size = 20, t_fea_num = 300):
     captions = []
     batch_of_beams = [ [(0.0, [0])] for i in range(batch_size)]
 
@@ -104,7 +98,7 @@ def predict_captions_forward_batch_glove(img_fea, word2vec_fea, idx2word, batch_
             idx_base += len(idx_prev_j)
         x_sym = np.zeros((x_i.shape[0], SEQUENCE_LENGTH -1, t_fea_num), dtype='float32')
         x_sym[:,0:x_i.shape[1],:] = x_i
-        network_pred = f_pred(v_i, x_sym) 
+        network_pred = f_pred(v_i, x_sym, word2vec_fea_np) 
         p = np.zeros((network_pred.shape[0], network_pred.shape[2]))
         for i in range(network_pred.shape[0]):
             p[i,:] = network_pred[i,idx_of_idx_len[i],:]
@@ -129,6 +123,7 @@ def predict_captions_forward_batch_glove(img_fea, word2vec_fea, idx2word, batch_
         pred = [(b[0], b[1]) for b in beams ]
         captions.append(pred)
     return captions 
+
 
 
 if __name__ == '__main__':
@@ -156,27 +151,33 @@ if __name__ == '__main__':
     save_dir=cf.get('OUTPUT', 'save_dir') + model_fn_pure
     if not os.path.isdir(save_dir):
         os.makedirs(save_dir)
-
     d = pickle.load(open(model_fn))
     idx2word = d['vocab']
     params_loaded = d['param_vals']
-    
+
     word2idx = {}
     for idx in idx2word:
         word2idx[idx2word[idx]] = idx
     
+ 
     dp = getDataProvider(dataset)
     # Now, load the vocab.
     idx2word, word2idx = load_vocab(vocab_fn)
     word2vec_fea, t_num_fea = load_vocab_fea(word_vec_fn)
+    word2vec_fea_np = np.zeros((len(idx2word), t_num_fea), dtype = 'float32')
+    for i in range(len(idx2word)):
+        word2vec_fea_np[i,:] = word2vec_fea[idx2word[i]] / np.linalg.norm(word2vec_fea[idx2word[i]])
+        #word2vec_fea_np[i,:] = word2vec_fea[idx2word[i]]
+
     logging.info('Total vocab has a total of %d words and feas %d', len(word2idx), len(word2vec_fea))
 
     SEQUENCE_LENGTH = 32
     MAX_SENTENCE_LENGTH = SEQUENCE_LENGTH - 3 # 1 for image, 1 for start token, 1 for end token
-    BATCH_SIZE = 100
-    CNN_FEATURE_SIZE = 1000
     EMBEDDING_SIZE = 256
+    LEARNING_RATE = 0.001
+    save_fn = 'lstm_coco_trained_{}_euc_softmax.pkl'.format(LEARNING_RATE)
 
+    logging.info("Saving model to {}".format(save_fn))
     batch_size = 256
     def vis_fea_len():
         pair = dp.sampleImageSentencePair()
@@ -200,14 +201,11 @@ if __name__ == '__main__':
             tokens.extend(pair['sentence']['tokens'][0:SEQUENCE_LENGTH-3])
             tokens.append('.')
 
-            j = 0
-            for w in tokens:
+            for j, w in enumerate(tokens):
                 if w in word2idx:
                     fea[ i, j, :] = word2vec_fea[w]
-                    if j > 0:
-                        mask[i, j-1] = 1.0
-                        label[i, j-1] = word2idx[w]
-                    j += 1
+                    mask[i, j] = 1.0
+                    label[i, j] = word2idx[w]
         return fea, label, mask, vis_fea
 
     def batch_val():
@@ -226,14 +224,11 @@ if __name__ == '__main__':
             tokens.extend(pair['sentence']['tokens'][0:SEQUENCE_LENGTH-2])
             tokens.append('.')
 
-            j = 0
-            for w in tokens:
+            for j,w in enumerate(tokens):
                 if w in word2idx:
                     fea[ i, j, :] = word2vec_fea[w]
-                    if j > 0:
-                        mask[i, j-1] = 1.0
-                        label[i, j-1] = word2idx[w]
-                    j += 1
+                    mask[i, j] = 1.0
+                    label[i, j] = word2idx[w]
         return fea, label, mask, vis_fea
 
     # Now, we can start building the model
@@ -241,6 +236,7 @@ if __name__ == '__main__':
     l_input_sentence_shp = lasagne.layers.ReshapeLayer(l_input_sentence, (-1, l_input_sentence.output_shape[2]))
     l_sentence_embedding = lasagne.layers.DenseLayer(l_input_sentence_shp, num_units = e_size,
                                                 nonlinearity=lasagne.nonlinearities.identity)
+
     l_sentence_embedding_shp = lasagne.layers.ReshapeLayer(l_sentence_embedding,(-1,
         l_input_sentence.output_shape[1], e_size))
     l_input_cnn = lasagne.layers.InputLayer((None, vis_fea_len))
@@ -249,7 +245,6 @@ if __name__ == '__main__':
     
     l_cnn_embedding = lasagne.layers.ReshapeLayer(l_cnn_embedding, ([0], 1, [1]))
     
-    # the two are concatenated to form the RNN input with dim (BATCH_SIZE, SEQUENCE_LENGTH, EMBEDDING_SIZE)
     l_rnn_input = lasagne.layers.ConcatLayer([l_cnn_embedding, l_sentence_embedding_shp])
     
     l_dropout_input = lasagne.layers.DropoutLayer(l_rnn_input, p=0.5)
@@ -259,43 +254,50 @@ if __name__ == '__main__':
                                       grad_clipping=5.)
     l_dropout_output = lasagne.layers.DropoutLayer(l_lstm, p=0.5)
     
-    # the RNe output is reshaped to combine the batch and time dimensions
-    # dim (BATCH_SIZE * SEQUENCE_LENGTH, EMBEDDING_SIZE)
+    # the RNN output is reshaped to combine the batch and time dimensions
     l_shp = lasagne.layers.ReshapeLayer(l_dropout_output, (-1, e_size))
-    
-    # decoder is a fully connected layer with one output unit for each word in the vocabulary
-    l_decoder = lasagne.layers.DenseLayer(l_shp, num_units=len(idx2word), nonlinearity=lasagne.nonlinearities.softmax)
-    
-    # finally, the separation between batch and time dimension is restored
-    l_out = lasagne.layers.ReshapeLayer(l_decoder, (-1, SEQUENCE_LENGTH, len(idx2word)))
+    # Now, we need to calculate the distance between this layer as well
+    l_out = lasagne.layers.DenseLayer(l_shp, num_units = t_num_fea)
+
     
     # cnn feature vector
     x_cnn_sym = T.matrix()
     
     x_sentence_sym = T.tensor3()
     
+    # mask defines which elements of the sequence should be predicted
+    mask_sym = T.imatrix()
+    vocab_sym = T.matrix() # vocab of the glove features for the dictionary.
+    
+    # ground truth for the RNN output
+    y_sentence_sym = T.imatrix()
+    
     output = lasagne.layers.get_output(l_out, {
                     l_input_sentence: x_sentence_sym,
                     l_input_cnn: x_cnn_sym
     }, deterministic  = True)
 
-    f_pred = theano.function([x_cnn_sym, x_sentence_sym], output)
-
-    # Now, predict the captions. 
-
-    # Now set the parameters.
     lasagne.layers.set_all_param_values(l_out, params_loaded)
-
+    def calc_euc_softmax(net_output, word2vec_fea):
+        # Calc the distance.
+        dist = ( net_output** 2).sum(1).reshape((net_output.shape[0], 1)) \
+                + (word2vec_fea ** 2).sum(1).reshape((1, word2vec_fea.shape[0])) - 2 * net_output.dot(word2vec_fea.T) # n * vocab
+        # Now, softmax.
+        z = T.exp( - dist + dist.max(axis = 1, keepdims = True) )
+        prob = z / z.sum(axis = 1, keepdims = True) # n * vocab
+        prob = T.reshape(prob, (-1, SEQUENCE_LENGTH, len(idx2word)))
+        return prob
+    
+    prob_output = calc_euc_softmax(output, vocab_sym)
+    
+    f_pred = theano.function([x_cnn_sym, x_sentence_sym, vocab_sym], prob_output)
     def iter_test_imgs(max_images):
         for img in dp.iterImages('test', max_images=max_images):
             vis_fea = np.zeros((1, vis_fea_len), dtype='float32')
             vis_fea[0, :] = np.squeeze(img['feat'][:])
             img_fn = img['filename']
             yield vis_fea, img 
-    
-    
-    #predict_captions_forward_batch_glove(img_fea, word2vec_fea, idx2word, batch_size, beam_size = 20):
-
+ 
     # Now, it's time to do the beam search to generate captions.
     batch_vis_fea = np.zeros((batch_size, vis_fea_len), dtype='float32')
     batch_imgs = []
@@ -323,7 +325,7 @@ if __name__ == '__main__':
             start_num = (batch_cnt - 1) * batch_size + 1
             end_num= min(max_images, batch_cnt * batch_size)
             logging.info('batch %d-%d/%d:', start_num, end_num, max_images)
-            batch_captions = predict_captions_forward_batch_glove(batch_vis_fea, word2vec_fea, idx2word, batch_size, beam_size)
+            batch_captions = predict_captions_forward_batch_glove(batch_vis_fea, word2vec_fea,word2vec_fea_np, idx2word, batch_size, beam_size)
             for caption, img in zip (batch_captions, batch_imgs):
                 top_prediction = caption[0]
                 # ix 0 is the END token, skip that
@@ -348,7 +350,7 @@ if __name__ == '__main__':
         num_imgs = max_images -  batch_cnt * batch_size
         start_num = (batch_cnt ) * batch_size + 1
         logging.info('batch %d-%d/%d:', start_num, max_images, max_images)
-        batch_captions = predict_captions_forward_batch_glove(batch_vis_fea, word2vec_fea, idx2word, batch_size, beam_size)
+        batch_captions = predict_captions_forward_batch_glove(batch_vis_fea, word2vec_fea, word2vec_fea_np, idx2word, batch_size, beam_size)
         batch_captions = batch_captions[:num_imgs]
         for caption, img in zip (batch_captions, batch_imgs):
             top_prediction = caption[0]

@@ -241,7 +241,7 @@ def main():
                 if not(j % PRINT_FREQ):
                     p = probs(x)
                     ppl = perplexity(p,y,mask)
-                    logging.info("Epoch {}, average loss = {}, PPL = {}".format(epoch, avg_cost / PRINT_FREQ, ppl))
+                    logging.info("Epoch {}, mini_batch = %d/%d, avg loss = {}, PPL = {}".format(epoch, j, mini_batches_p_epo, avg_cost / PRINT_FREQ, ppl))
                     avg_cost = 0
                 if not(j % EVAL_FREQ):
                     x,y, mask = batch_val(dp)

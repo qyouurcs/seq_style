@@ -8,6 +8,7 @@ from lasagne.utils import floatX
 import pickle
 import gzip
 import random
+import pdb
 from collections import Counter
 
 
@@ -94,8 +95,8 @@ l_out = lasagne.layers.ReshapeLayer(l_decoder, (-1, SEQUENCE_LENGTH, VOCAB_SIZE)
 hid_out, hid2_out, prob_out = lasagne.layers.get_output([l_rnn, l_rnn2, l_out],
                                                         {l_input: x_sym})
 
-hid_out = hid_out[:, -1]
-hid2_out = hid2_out[:, -1]
+hid_out2 = hid_out[:, -1]
+hid2_out2 = hid2_out[:, -1]
 
 def calc_cross_ent(net_output, targets):
     preds = T.reshape(net_output, (-1, VOCAB_SIZE))
@@ -116,18 +117,18 @@ all_grads, norm = lasagne.updates.total_norm_constraint(
     all_grads, MAX_GRAD_NORM, return_norm=True)
 
 updates = lasagne.updates.adam(all_grads, all_params, learning_rate=0.002)
+#f_train = theano.function([x_sym, y_sym, hid_init_sym, hid2_init_sym],
+#                          [hid_out ],
+#                          updates=updates
+#                         )
+
+
 f_train = theano.function([x_sym, y_sym, hid_init_sym, hid2_init_sym],
-                          [hid_out ],
+                          [loss, norm, hid_out2, hid2_out2],
                           updates=updates
                          )
 
-
-#f_train = theano.function([x_sym, y_sym, hid_init_sym, hid2_init_sym],
-#                          [loss, norm, hid_out, hid2_out],
-#                          updates=updates
-#                         )
-#
-#f_val = theano.function([x_sym, y_sym, hid_init_sym, hid2_init_sym], [loss, hid_out, hid2_out])
+f_val = theano.function([x_sym, y_sym, hid_init_sym, hid2_init_sym], [loss, hid_out, hid2_out])
 
 
 # Training takes a while - you may want to skip this and the next cell, and load the pretrained weights instead
@@ -138,6 +139,10 @@ train_batch_gen = data_batch_generator(train_corpus)
 
 for iteration in range(20000):
     x, y = prep_batch_for_network(next(train_batch_gen))
+    print x.shape
+    print y.shape
+    print hid.shape
+    print hid2.shape
     loss_train, norm, hid, hid2 = f_train(x, y, hid, hid2)
     
     if iteration % 250 == 0:

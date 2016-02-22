@@ -68,10 +68,12 @@ def load_vocab_fea(word_vec_fn, word2idx):
 
 def main():
     cf = ConfigParser.ConfigParser()
-    if len(sys.argv) < 2:
-        logging.info('Usage: {0} <conf_fn>'.format(sys.argv[0]))
+    if len(sys.argv) < 3:
+        logging.info('Usage: {0} <conf_fn> <model_fn>'.format(sys.argv[0]))
         sys.exit()
     cf.read(sys.argv[1])
+    model_fn = sys.argv[2]
+
     dataset = cf.get('INPUT', 'dataset')
     h_size = cf.get('INPUT', 'h_size').split(',')
 
@@ -83,12 +85,12 @@ def main():
     NUM_EPOCHS = int(cf.get("INPUT","epochs"))
     BATCH_SIZE = int(cf.get("INPUT", "batch_size"))
 
-    save_dir=cf.get('OUTPUT', 'save_dir')
-    
-    if not os.path.isdir(save_dir):
-        os.makedirs(save_dir)
+    # Now, we load the model.
+    d = pickle.load(open(model_fn))
 
-    save_fn = os.path.join(save_dir, os.path.basename(sys.argv[1]) + '_' + optim  + '.pkl')
+    word2idx = d['word2idx']
+    idx2word = d['idx2word']
+    params_loaded = d['param_vals']
 
     dp = getDataProvider(dataset)
     idx2word, word2idx = load_vocab(vocab_fn)
@@ -158,7 +160,7 @@ def main():
                         masks[i,pos - 1] = 1
                     pos += 1
         return x,y, masks
- 
+
     logging.info("Building network ...")    
    
     # First, we build the network, starting with an input layer
@@ -167,16 +169,18 @@ def main():
 
     l_in = lasagne.layers.InputLayer(shape=(BATCH_SIZE, MAX_SEQ_LENGTH, t_num_fea))
     l_in_dropout = lasagne.layers.DropoutLayer(l_in, p = 0.5)
-
+    t = None
     h_prev = lasagne.layers.LSTMLayer(
             l_in_dropout, int(h_size[0]), grad_clipping = GRAD_CLIP,
             nonlinearity=lasagne.nonlinearities.tanh)
+    t = h_prev
     h_cur = lasagne.layers.DropoutLayer(h_prev, p = 0.5)
     h_prev = h_cur
     for i in xrange(1,len(h_size)):
         h_cur = lasagne.layers.LSTMLayer(
                 h_prev, int(h_size[i]), grad_clipping=GRAD_CLIP,
                 nonlinearity=lasagne.nonlinearities.tanh)
+        t = h_cur
         h_prev = lasagne.layers.DropoutLayer(h_cur, p = 0.5)
         h_cur = h_prev
 
@@ -189,7 +193,14 @@ def main():
     # The sliced output is then passed through the softmax nonlinearity to create probability distribution of the prediction
     # The output of this stage is (batch_size, vocab_size)
     l_out = lasagne.layers.DenseLayer(l_forward_slice_rhp, num_units=vocab_size, W = lasagne.init.Normal(), nonlinearity=lasagne.nonlinearities.softmax)
-    
+
+    all_params = lasagne.layers.get_all_param_values(l_out)
+
+    ############################
+    # set the params.
+    #
+    lasagne.layers.set_all_param_values(l_out, params_loaded)
+
     logging.info('l_out shape {0}, {1}'.format(l_out.output_shape[0],l_out.output_shape[1]))
 
     # Theano tensor for the targets
@@ -215,62 +226,28 @@ def main():
     cost_train = T.mean(calc_cross_ent(network_output, mask_sym, target_values))
     cost_test = T.mean(calc_cross_ent(network_output_tst, mask_sym, target_values))
 
-    all_params = lasagne.layers.get_all_params(l_out)
-    # Compute AdaGrad updates for training
-    logging.info("Computing updates ...")
-    if optim == 'ada':
-        updates = lasagne.updates.adagrad(cost_train, all_params, LEARNING_RATE)
-    elif optim == 'adam':
-        updates = lasagne.updates.adam(cost_train, all_params, LEARNING_RATE)
-    elif optim == 'rmsprop':
-        updates = lasagne.updates.rmsprop(cost_train, all_params, LEARNING_RATE)
-
-    # Theano functions for training and computing cost
     logging.info("Compiling functions ...")
-    f_train = theano.function([l_in.input_var, target_values, mask_sym], cost_train, updates=updates, allow_input_downcast=True)
     f_val = theano.function([l_in.input_var, target_values, mask_sym], cost_test, allow_input_downcast=True)
 
-    # In order to generate text from the network, we need the probability distribution of the next character given
-    # the state of the network and the input (a seed).
-    # In order to produce the probability distribution of the prediction, we compile a function called probs. 
-    
-    probs_train = theano.function([l_in.input_var],network_output_rhp,allow_input_downcast=True)
     probs_test = theano.function([l_in.input_var],network_output_rhp_tst,allow_input_downcast=True)
 
-    logging.info("Training ...")
-    data_size = dp.getSplitSize('train')
-    mini_batches_p_epo = int(math.floor(data_size / BATCH_SIZE))
-    try:
-        for epoch in xrange(NUM_EPOCHS):
-            avg_cost = 0;
-
-            for j in xrange(mini_batches_p_epo):
-            #for _ in range(PRINT_FREQ):
-                x,y, mask = batch_train(dp)
-                avg_cost += f_train(x, y, mask)
-                if not(j % PRINT_FREQ):
-                    p = probs_train(x)
-                    ppl = perplexity(p,y,mask)
-                    logging.info("Epoch {}, mini_batch = {}/{}, avg loss = {}, PPL = {}".format(epoch, j, mini_batches_p_epo, avg_cost / PRINT_FREQ, ppl))
-                    avg_cost = 0
-                if not(j % EVAL_FREQ):
-                    x,y, mask = batch_val(dp)
-                    val_cost = f_val(x, y, mask)
-                    p = probs_test(x)
-                    ppl = perplexity(p,y,mask)
-                    logging.info("-----------------------------------------------------")
-                    logging.warning("\tVAL average loss = {}, PPL = {}".format(val_cost, ppl))
-            # We also need to eval on the val dataset. 
-    except KeyboardInterrupt:
-        pass
+    logging.info("Testing...")
+    data_size = dp.getSplitSize('test')
+    logging.info('Total of {}'.format(data_size))
+    
+    pdb.set_trace()
     param_values = lasagne.layers.get_all_param_values(l_out)
-    param_syms = lasagne.layers.get_all_param_values(l_out)
+    param_syms = lasagne.layers.get_all_params(l_out)
+    param_strs = []
+    for sym in param_syms:
+        param_strs.append(str(sym))
 
     d = {'param_vals': param_values,
+         'param_strs': param_strs,
             'word2idx':word2idx,
             'idx2word':idx2word}
+    save_fn = model_fn + '.add.strs'
     pickle.dump(d,  open(save_fn,'w'), protocol=pickle.HIGHEST_PROTOCOL)
     logging.info("Done with {}".format(save_fn))
-
 if __name__ == '__main__':
     main()

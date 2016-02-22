@@ -17,21 +17,8 @@ from lasagne.utils import floatX
 
 from data_provider import *
 
-from pycocotools.coco import COCO
-from pycocoevalcap.eval import COCOEvalCap
-
-
-
 logging = climate.get_logger(__name__)
 climate.enable_default_logging()
-
-def coco_eval(ann_fn, json_fn, save_fn):
-    coco = COCO(ann_fn)
-    coco_res = coco.loadRes(json_fn)
-    coco_evaluator = COCOEvalCap(coco, coco_res)
-    # comment below line to evaluate the full validation or testing set. 
-    coco_evaluator.params['image_id'] = coco_res.getImgIds()
-    coco_evaluator.evaluate(save_fn)
 
 
 def load_vocab(vocab_fn):
@@ -150,16 +137,11 @@ if __name__ == '__main__':
     if cf.has_option('INPUT', 'word_vec_fn'):
         word_vec_fn = cf.get('INPUT', 'word_vec_fn')
     vocab_fn =  cf.get('INPUT', 'vocab_fn')
-
-    model_fn_pure = os.path.basename(model_fn)
-
-    save_dir=cf.get('OUTPUT', 'save_dir') + model_fn_pure
-    if not os.path.isdir(save_dir):
-        os.makedirs(save_dir)
+    save_dir=cf.get('OUTPUT', 'save_dir')
 
     d = pickle.load(open(model_fn))
     idx2word = d['vocab']
-    params_loaded = d['param_vals']
+    params_loaded = d['param values']
     
     word2idx = {}
     for idx in idx2word:
@@ -269,6 +251,8 @@ if __name__ == '__main__':
     # finally, the separation between batch and time dimension is restored
     l_out = lasagne.layers.ReshapeLayer(l_decoder, (-1, SEQUENCE_LENGTH, len(idx2word)))
     
+    # Now set the parameters.
+    lasagne.layers.set_all_param_values(l_out, params_loaded)
     # cnn feature vector
     x_cnn_sym = T.matrix()
     
@@ -277,110 +261,38 @@ if __name__ == '__main__':
     output = lasagne.layers.get_output(l_out, {
                     l_input_sentence: x_sentence_sym,
                     l_input_cnn: x_cnn_sym
-    }, deterministic  = True)
+    })
 
     f_pred = theano.function([x_cnn_sym, x_sentence_sym], output)
 
     # Now, predict the captions. 
 
-    # Now set the parameters.
-    lasagne.layers.set_all_param_values(l_out, params_loaded)
 
     def iter_test_imgs(max_images):
         for img in dp.iterImages('test', max_images=max_images):
             vis_fea = np.zeros((1, vis_fea_len), dtype='float32')
-            vis_fea[0, :] = np.squeeze(img['feat'][:])
             img_fn = img['filename']
-            yield vis_fea, img 
-    
-    
-    #predict_captions_forward_batch_glove(img_fea, word2vec_fea, idx2word, batch_size, beam_size = 20):
+            return vis_fea, img 
 
-    # Now, it's time to do the beam search to generate captions.
-    batch_vis_fea = np.zeros((batch_size, vis_fea_len), dtype='float32')
-    batch_imgs = []
-    batch_cnt = 0
-    all_references = []
-    all_candidates = []
-    all_logprobs = []
-    img_ids = []
+    def predict(x_cnn):
+        x_sentence = np.zeros((batch_size, SEQUENCE_LENGTH - 1, 300), dtype='float32')
+        words = []
+        i = 0
+        while True:
+            i += 1
+            p0 = f_pred(x_cnn, x_sentence)
+            pa = p0.argmax(-1)
+            tok = pa[0][i]
+            word = idx2word[tok]
+            if word == '#END#' or i >= SEQUENCE_LENGTH - 1:
+                return ' '.join(words)
+            else:
+                x_sentence[0][i] = tok
+                if word != '#START#':
+                    words.append(word)
+    x_cnn,img = iter_test_imgs(-1)
+    pdb.set_trace()
+    x_cnn = np.tile(x_cnn, [batch_size,1])
 
-    log = os.path.join(save_dir,'log.log')
-    wfid = open(log,'w')
-    #max_images = -1
-    max_images = dp.getSplitSize('test','images')
-    all_beam_search = []
-    result_list = []
-    beam_size = 3
-    for i,(vis_fea, img_iter) in enumerate(iter_test_imgs(max_images)):
-        references = [' '.join(x['tokens']) for x in img_iter['sentences']]  # as list of lists of tokens
-        all_references.append(references)
-        batch_vis_fea[i%batch_size,:] = vis_fea
-        batch_imgs.append(img_iter)
-
-        if not (i+1) %  batch_size:
-            batch_cnt += 1
-            start_num = (batch_cnt - 1) * batch_size + 1
-            end_num= min(max_images, batch_cnt * batch_size)
-            logging.info('batch %d-%d/%d:', start_num, end_num, max_images)
-            batch_captions = predict_captions_forward_batch_glove(batch_vis_fea, word2vec_fea, idx2word, batch_size, beam_size)
-            for caption, img in zip (batch_captions, batch_imgs):
-                top_prediction = caption[0]
-                # ix 0 is the END token, skip that
-                candidate = ' '.join([idx2word[ix] for ix in top_prediction[1] if ix > 0])
-                print >>wfid, 'PRED: (%f) %s' % (top_prediction[0], candidate)
-                all_candidates.append(candidate)
-                all_logprobs.append(str(top_prediction[0]))
-                cur_img = {}
-                cur_img['image_id'] = img['cocoid']
-                cur_img['caption'] = candidate
-                result_list.append(cur_img)
-                img_ids.append(img['filename'])
-
-                img['gen_beam_search_10'] = []
-                for score, tokens in caption:
-                    img['gen_beam_search_10'].append([idx2word[ix] for ix in tokens if ix > 0])
-                all_beam_search.append(img)
-
-            batch_imgs = []
-    # Now set the parameters.
-    if max_images % batch_size:
-        num_imgs = max_images -  batch_cnt * batch_size
-        start_num = (batch_cnt ) * batch_size + 1
-        logging.info('batch %d-%d/%d:', start_num, max_images, max_images)
-        batch_captions = predict_captions_forward_batch_glove(batch_vis_fea, word2vec_fea, idx2word, batch_size, beam_size)
-        batch_captions = batch_captions[:num_imgs]
-        for caption, img in zip (batch_captions, batch_imgs):
-            top_prediction = caption[0]
-            # ix 0 is the END token, skip that
-            candidate = ' '.join([idx2word[ix] for ix in top_prediction[1] if ix > 0])
-            print >>wfid, 'PRED: (%f) %s' % (top_prediction[0], candidate)
-            cur_img = {}
-            cur_img['image_id'] = img['cocoid']
-            cur_img['caption'] = candidate
-            result_list.append(cur_img)
-            img_ids.append(img['filename'])
-
-            all_candidates.append(candidate)
-            all_logprobs.append(str(top_prediction[0]))
-
-             # Now all beam_search.
-            img['gen_beam_search_10'] = []
-            for score, tokens in caption:
-                img['gen_beam_search_10'].append([idx2word[ix] for ix in tokens if ix > 0])
-            all_beam_search.append(img)
-
-
-    json_fn = os.path.join(save_dir, 'captions.json')
-    with open(json_fn, 'w') as json_fid:
-        json.dump(result_list, json_fid)
-
-    np_all_bs = np.asarray(all_beam_search)
-    # start the eval code.
-    join_str = [ str(img_id) + ' ' + str(score) for img_id, score in zip(img_ids, all_logprobs) ]
-    open(os.path.join(save_dir,'4_visual.txt'), 'w').write('\n'.join(join_str))
-    open(os.path.join(save_dir,'output'), 'w').write('\n'.join(all_candidates))
-    for q in xrange(5):
-        open(os.path.join(save_dir,'reference' + repr(q)), 'w').write('\n'.join([x[q] for x in all_references]))
-
-    coco_eval(ann_fn, json_fn)
+    for _ in range(5):
+        print(predict(x_cnn))
