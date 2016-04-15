@@ -26,6 +26,7 @@ def perplexity(p, y, mask):
     vocab_size = p.shape[2]
 
     PPL = np.zeros((batch_size,))
+    PPLe = np.zeros((batch_size,))
     for i in range(batch_size):
         ppl_i = 0
         len_i = 0
@@ -35,8 +36,9 @@ def perplexity(p, y, mask):
                 ppl_i += math.log(p[i][j][y[i][j]],2)
         ppl_i /= len_i
         PPL[i] = 2**(-ppl_i)
+        PPLe[i] = math.exp(-ppl_i)
 
-    return np.mean(PPL)
+    return np.mean(PPL), np.mean(PPLe)
 
 def load_vocab(vocab_fn):
     idx2word = {}
@@ -85,6 +87,8 @@ def main():
     NUM_EPOCHS = int(cf.get("INPUT","epochs"))
     BATCH_SIZE = int(cf.get("INPUT", "batch_size"))
 
+    train_fn=cf.get('INPUT', 'train_fn')
+    val_fn=cf.get('INPUT', 'val_fn')
     # Now, we load the model.
     d = pickle.load(open(model_fn))
 
@@ -103,57 +107,61 @@ def main():
     
     # All gradients above this will be clipped
     GRAD_CLIP = 100
-    
-    # How often should we check the output?
     PRINT_FREQ = 1
-    
-    # Number of epochs to train the net
-    
-    # Batch Size
-    MAX_SEQ_LENGTH = 32
-
+    MAX_SEQ_LENGTH = 50
     EVAL_FREQ = 10
-    
-    # New strategy, just omit out-of-dict words.
-    def batch_train(dp, batch_size = BATCH_SIZE):
 
-        batch = [dp.sampleSentence() for i in xrange(batch_size)]
-        
+    dict_train = {}
+    with open(train_fn) as fid:
+        for i,aline in enumerate(fid):
+            dict_train[i] = aline.strip()
+
+    dict_val = {}
+    with open(val_fn) as fid:
+        for i,aline in enumerate(fid):
+            dict_val[i] = aline.strip()
+    
+    train_range = range(len(dict_train))
+    def batch_train(batch_size = BATCH_SIZE):
+        random.shuffle(train_range)
+        batch = train_range[0:batch_size]
+
         x = np.zeros((batch_size,MAX_SEQ_LENGTH, t_num_fea))
         y = np.zeros((batch_size,MAX_SEQ_LENGTH-1), dtype='int32')
         masks = np.zeros((batch_size, MAX_SEQ_LENGTH-1), dtype='int32')
 
         for i, sent in enumerate(batch):
             tokens = ['#START#']
-            tokens.extend(sent['tokens'][0:MAX_SEQ_LENGTH-2])
+            tokens.extend(dict_train[batch[i]].split()[0:MAX_SEQ_LENGTH-2])
             tokens.append('.')
             
             pos = 0
             for j,word in enumerate(tokens):
-                if word in word2idx:
+                if word in word2vec_fea:
                     x[i,pos,:] = word2vec_fea[word]
                     if pos > 0:
                         y[i,pos-1] = word2idx[word]
                         masks[i,pos-1] = 1
                     pos += 1
         return x,y, masks
-    
-    def batch_val(dp, batch_size = BATCH_SIZE):
 
-        batch = [dp.sampleSentence('val') for i in xrange(batch_size)]
-        
+    val_range = range(len(dict_val))
+    def batch_val(batch_size = BATCH_SIZE):
+        random.shuffle(val_range)
+        batch = val_range[0:batch_size]
+
         x = np.zeros((batch_size,MAX_SEQ_LENGTH, t_num_fea))
         y = np.zeros((batch_size,MAX_SEQ_LENGTH-1), dtype='int32')
         masks = np.zeros((batch_size, MAX_SEQ_LENGTH-1), dtype='int32')
 
         for i, sent in enumerate(batch):
             tokens = ['#START#']
-            tokens.extend(sent['tokens'][0:MAX_SEQ_LENGTH-2])
+            tokens.extend(dict_val[batch[i]].split()[0:MAX_SEQ_LENGTH-2])
             tokens.append('.')
             
             pos = 0
             for j,word in enumerate(tokens):
-                if word in word2idx:
+                if word in word2vec_fea:
                     x[i,pos,:] = word2vec_fea[word]
                     if pos > 0:
                         y[i, pos - 1] = word2idx[word]
@@ -204,14 +212,9 @@ def main():
     mask_sym = T.imatrix('mask')
     
     # lasagne.layers.get_output produces a variable for the output of the net
-    network_output = lasagne.layers.get_output(l_out)
-    network_output_tst = lasagne.layers.get_output(l_out, deterministic = False)
-
     l_out_rhp = lasagne.layers.ReshapeLayer(l_out,(l_forward_slice.output_shape[0], l_forward_slice.output_shape[1], vocab_size))
-    network_output_rhp = lasagne.layers.get_output(l_out_rhp)
-    network_output_rhp_tst = lasagne.layers.get_output(l_out_rhp, deterministic = False)
-
-    # The loss function is calculated as the mean of the (categorical) cross-entropy between the prediction and target.
+    network_output = lasagne.layers.get_output(l_out_rhp)
+    network_output_tst = lasagne.layers.get_output(l_out_rhp, deterministic = False)
 
     def calc_cross_ent(net_output, mask_sym, targets):
         preds = T.reshape(net_output, (-1, len(word2idx)))
@@ -219,16 +222,15 @@ def main():
         cost = T.nnet.categorical_crossentropy(preds, targets)[T.flatten(mask_sym).nonzero()]
         return cost
 
-    cost_train = T.mean(calc_cross_ent(network_output, mask_sym, target_values))
     cost_test = T.mean(calc_cross_ent(network_output_tst, mask_sym, target_values))
 
     logging.info("Compiling functions ...")
     f_val = theano.function([l_in.input_var, target_values, mask_sym], cost_test, allow_input_downcast=True)
 
-    probs_test = theano.function([l_in.input_var],network_output_rhp_tst,allow_input_downcast=True)
+    probs_test = theano.function([l_in.input_var],network_output_tst,allow_input_downcast=True)
 
     logging.info("Testing...")
-    data_size = dp.getSplitSize('test')
+    data_size = len(dict_val)
     logging.info('Total of {}'.format(data_size))
     
     avg_cost = 0

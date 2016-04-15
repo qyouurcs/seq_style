@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import sys
 import scipy.io
 import codecs
 import pdb
@@ -194,4 +195,13 @@ def getDataProvider(dataset):
     return BasicDataProvider(dataset)
 
 if __name__ == '__main__':
-    dp = getDataProvider('flickr8k')
+
+    if len(sys.argv) < 2:
+        print 'Usage: {0} <split>'.format(sys.argv[0])
+        sys.exit()
+
+    split = sys.argv[1]
+    dp = getDataProvider('coco_inception')
+
+    for sent in dp.iterSentences(split):
+        print sent['raw']

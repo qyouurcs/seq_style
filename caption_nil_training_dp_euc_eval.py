@@ -178,7 +178,7 @@ if __name__ == '__main__':
     save_fn = 'lstm_coco_trained_{}_euc_softmax.pkl'.format(LEARNING_RATE)
 
     logging.info("Saving model to {}".format(save_fn))
-    batch_size = 256
+    batch_size = 100
     def vis_fea_len():
         pair = dp.sampleImageSentencePair()
         vis_fea_len = 0

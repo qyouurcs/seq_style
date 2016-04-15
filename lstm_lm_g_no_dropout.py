@@ -68,12 +68,10 @@ def load_vocab_fea(word_vec_fn, word2idx):
 
 def main():
     cf = ConfigParser.ConfigParser()
-    if len(sys.argv) < 3:
-        logging.info('Usage: {0} <conf_fn> <model_fn>'.format(sys.argv[0]))
+    if len(sys.argv) < 2:
+        logging.info('Usage: {0} <conf_fn>'.format(sys.argv[0]))
         sys.exit()
     cf.read(sys.argv[1])
-    model_fn = sys.argv[2]
-
     dataset = cf.get('INPUT', 'dataset')
     h_size = cf.get('INPUT', 'h_size').split(',')
 
@@ -85,12 +83,15 @@ def main():
     NUM_EPOCHS = int(cf.get("INPUT","epochs"))
     BATCH_SIZE = int(cf.get("INPUT", "batch_size"))
 
-    # Now, we load the model.
-    d = pickle.load(open(model_fn))
+    save_dir=cf.get('OUTPUT', 'save_dir')
+    
+    if not os.path.isdir(save_dir):
+        os.makedirs(save_dir)
+    
+    h_size_str = [str(h) for h in h_size]
+    h_size_str = '_'.join(h_size_str)
 
-    word2idx = d['word2idx']
-    idx2word = d['idx2word']
-    params_loaded = d['param_vals']
+    save_fn = os.path.join(save_dir, os.path.basename(sys.argv[1]) + '_' + optim  + '_' + h_size_str + '_no_dropout.pkl')
 
     dp = getDataProvider(dataset)
     idx2word, word2idx = load_vocab(vocab_fn)
@@ -98,27 +99,13 @@ def main():
 
     word2vec_fea, t_num_fea = load_vocab_fea(word_vec_fn, word2idx)
 
-    #Lasagne Seed for Reproducibility
     lasagne.random.set_rng(np.random.RandomState(1))
-    
-    # All gradients above this will be clipped
     GRAD_CLIP = 100
-    
-    # How often should we check the output?
-    PRINT_FREQ = 1
-    
-    # Number of epochs to train the net
-    
-    # Batch Size
     MAX_SEQ_LENGTH = 32
-
     EVAL_FREQ = 10
-    
-    # New strategy, just omit out-of-dict words.
+    PRINT_FREQ = 10
     def batch_train(dp, batch_size = BATCH_SIZE):
-
         batch = [dp.sampleSentence() for i in xrange(batch_size)]
-        
         x = np.zeros((batch_size,MAX_SEQ_LENGTH, t_num_fea))
         y = np.zeros((batch_size,MAX_SEQ_LENGTH-1), dtype='int32')
         masks = np.zeros((batch_size, MAX_SEQ_LENGTH-1), dtype='int32')
@@ -139,9 +126,7 @@ def main():
         return x,y, masks
     
     def batch_val(dp, batch_size = BATCH_SIZE):
-
         batch = [dp.sampleSentence('val') for i in xrange(batch_size)]
-        
         x = np.zeros((batch_size,MAX_SEQ_LENGTH, t_num_fea))
         y = np.zeros((batch_size,MAX_SEQ_LENGTH-1), dtype='int32')
         masks = np.zeros((batch_size, MAX_SEQ_LENGTH-1), dtype='int32')
@@ -160,26 +145,25 @@ def main():
                         masks[i,pos - 1] = 1
                     pos += 1
         return x,y, masks
-
+ 
     logging.info("Building network ...")    
    
-    # First, we build the network, starting with an input layer
-    # Recurrent layers expect input of shape
-    # (batch size, SEQ_LENGTH, num_features)
-
     l_in = lasagne.layers.InputLayer(shape=(BATCH_SIZE, MAX_SEQ_LENGTH, t_num_fea))
-    l_in_dropout = lasagne.layers.DropoutLayer(l_in, p = 0.5)
+    #l_in_dropout = lasagne.layers.DropoutLayer(l_in, p = 0.5)
+    l_in_dropout = l_in
 
     h_prev = lasagne.layers.LSTMLayer(
             l_in_dropout, int(h_size[0]), grad_clipping = GRAD_CLIP,
             nonlinearity=lasagne.nonlinearities.tanh)
-    h_cur = lasagne.layers.DropoutLayer(h_prev, p = 0.5)
+    #h_cur = lasagne.layers.DropoutLayer(h_prev, p = 0.5)
+    h_cur = h_prev
     h_prev = h_cur
     for i in xrange(1,len(h_size)):
         h_cur = lasagne.layers.LSTMLayer(
                 h_prev, int(h_size[i]), grad_clipping=GRAD_CLIP,
                 nonlinearity=lasagne.nonlinearities.tanh)
-        h_prev = lasagne.layers.DropoutLayer(h_cur, p = 0.5)
+        #h_prev = lasagne.layers.DropoutLayer(h_cur, p = 0.5)
+        h_prev = h_cur
         h_cur = h_prev
 
     # The output of the sliced layer will then be of size (batch_size, SEQ_LENGH-1, N_HIDDEN)
@@ -192,11 +176,6 @@ def main():
     # The output of this stage is (batch_size, vocab_size)
     l_out = lasagne.layers.DenseLayer(l_forward_slice_rhp, num_units=vocab_size, W = lasagne.init.Normal(), nonlinearity=lasagne.nonlinearities.softmax)
     
-    ############################
-    # set the params.
-    #
-    lasagne.layers.set_all_param_values(l_out, params_loaded)
-
     logging.info('l_out shape {0}, {1}'.format(l_out.output_shape[0],l_out.output_shape[1]))
 
     # Theano tensor for the targets
@@ -204,14 +183,10 @@ def main():
     mask_sym = T.imatrix('mask')
     
     # lasagne.layers.get_output produces a variable for the output of the net
-    network_output = lasagne.layers.get_output(l_out)
-    network_output_tst = lasagne.layers.get_output(l_out, deterministic = False)
 
     l_out_rhp = lasagne.layers.ReshapeLayer(l_out,(l_forward_slice.output_shape[0], l_forward_slice.output_shape[1], vocab_size))
-    network_output_rhp = lasagne.layers.get_output(l_out_rhp)
-    network_output_rhp_tst = lasagne.layers.get_output(l_out_rhp, deterministic = False)
-
-    # The loss function is calculated as the mean of the (categorical) cross-entropy between the prediction and target.
+    network_output = lasagne.layers.get_output(l_out_rhp, deterministic = False)
+    network_output_tst = lasagne.layers.get_output(l_out_rhp, deterministic = True)
 
     def calc_cross_ent(net_output, mask_sym, targets):
         preds = T.reshape(net_output, (-1, len(word2idx)))
@@ -222,81 +197,62 @@ def main():
     cost_train = T.mean(calc_cross_ent(network_output, mask_sym, target_values))
     cost_test = T.mean(calc_cross_ent(network_output_tst, mask_sym, target_values))
 
+    all_params = lasagne.layers.get_all_params(l_out)
+    # Compute AdaGrad updates for training
+    logging.info("Computing updates ...")
+    if optim == 'ada':
+        updates = lasagne.updates.adagrad(cost_train, all_params, LEARNING_RATE)
+    elif optim == 'adam':
+        updates = lasagne.updates.adam(cost_train, all_params, LEARNING_RATE)
+    elif optim == 'rmsprop':
+        updates = lasagne.updates.rmsprop(cost_train, all_params, LEARNING_RATE)
+
+    # Theano functions for training and computing cost
     logging.info("Compiling functions ...")
+    f_train = theano.function([l_in.input_var, target_values, mask_sym], cost_train, updates=updates, allow_input_downcast=True)
     f_val = theano.function([l_in.input_var, target_values, mask_sym], cost_test, allow_input_downcast=True)
 
-    probs_test = theano.function([l_in.input_var],network_output_rhp_tst,allow_input_downcast=True)
+    probs_train = theano.function([l_in.input_var],network_output_tst,allow_input_downcast=True)
+    probs_test = theano.function([l_in.input_var],network_output_tst,allow_input_downcast=True)
 
-    logging.info("Testing...")
-    data_size = dp.getSplitSize('test')
-    logging.info('Total of {}'.format(data_size))
-    
-    avg_cost = 0
-    ppl = 0
+    logging.info("Training ...")
+    data_size = dp.getSplitSize('train')
+    mini_batches_p_epo = int(math.floor(data_size / BATCH_SIZE))
+    try:
+        for epoch in xrange(NUM_EPOCHS):
+            avg_cost = 0;
 
-    x = np.zeros((BATCH_SIZE,MAX_SEQ_LENGTH, t_num_fea))
-    y = np.zeros((BATCH_SIZE,MAX_SEQ_LENGTH-1), dtype='int32')
-    masks = np.zeros((BATCH_SIZE, MAX_SEQ_LENGTH-1), dtype='int32')
+            for j in xrange(mini_batches_p_epo):
+                x,y, mask = batch_train(dp)
+                avg_cost += f_train(x, y, mask)
+                if not(j % PRINT_FREQ):
+                    p = probs_train(x)
+                    ppl = perplexity(p,y,mask)
+                    logging.info("Epoch {}, mini_batch = {}/{}, avg loss = {}, PPL = {}".format(epoch, j, mini_batches_p_epo, avg_cost / PRINT_FREQ, ppl))
+                    avg_cost = 0
+                if not(j % EVAL_FREQ):
+                    x,y,mask = batch_val(dp)
+                    val_cost = f_val(x, y, mask)
+                    p = probs_test(x)
+                    ppl = perplexity(p,y,mask)
+                    logging.info("-----------------------------------------------------")
+                    logging.warning("\tVAL average loss = {}, PPL = {}".format(val_cost, ppl))
+            # We also need to eval on the val dataset. 
+    except Exception:
+        logging.warning("EXCEPTION")
+        pass
+    param_values = lasagne.layers.get_all_param_values(l_out)
+    param_syms = lasagne.layers.get_all_params(l_out)
+    param_strs = []
+    for sym in param_syms:
+        param_strs.append(str(sym))
 
-    cnt = 0
-     
-    # This is the perplexity test for the test split. However, we also add the random generation of the sentences.
-    #for kk, sent in  enumerate(dp.iterSentences('test')):
-    #    tokens = ['#START#']
-    #    tokens.extend(sent['tokens'][0:MAX_SEQ_LENGTH-2])
-    #    tokens.append('.')
-    #    pos = 0
-    #    for j,word in enumerate(tokens):
-    #        if word in word2idx:
-    #            x[cnt,pos,:] = word2vec_fea[word]
-    #            if pos > 0:
-    #                y[cnt, pos - 1] = word2idx[word]
-    #                masks[cnt,pos - 1] = 1
-    #            pos += 1
-    #   
-    #    cnt += 1
-    #    if cnt % BATCH_SIZE == 0:
-    #        logging.info('Progress {}/{}'.format(kk, data_size))
-    #        avg_cost += f_val(x, y, masks)
-    #        p = probs_test(x)
-    #        ppl += perplexity(p,y,masks)
-    #        cnt = 0
-
-    #if cnt > 0:
-    #    #x = x[0:cnt,:]
-    #    #y = y[0:cnt,:]
-    #    #masks = masks[0:cnt,:]
-    #    avg_cost += f_val(x, y, masks)
-    #    p = probs_test(x)
-    #    ppl += perplexity(p,y,masks)
-    # We also need to eval on the val dataset. 
-
-    logging.info('Done.')
-    logging.info('avg_cost = {}'.format(avg_cost / data_size))
-    logging.info('ppl = {}'.format(ppl / data_size))
-    def predict():
-        x_sentence = np.zeros((BATCH_SIZE, MAX_SEQ_LENGTH, t_num_fea), dtype='float32')
-        x_sentence[:,0,:] = word2vec_fea["#START#"]
-        words = []
-        i = 0
-        while True:
-            #logging.info("i = %d/%d", i, MAX_SEQ_LENGTH -2)
-            p0 = probs_test(x_sentence)
-            pa = p0.argmax(-1)
-            #pa = np.random.choice(np.arange(p0.shape[-1]), p=p0[0,:].ravel())
-            tok = pa[0][i]
-            word = idx2word[tok]
-            if word == '.' or word == '#END#' or i > MAX_SEQ_LENGTH - 2:
-                return ' '.join(words)
-            else:
-                x_sentence[0][i+1] = word2vec_fea[word]
-                if word != '#START#':
-                    words.append(word)
-
-            i += 1
-    for i in range(5):
-        print(predict())
+    d = {'param_vals': param_values,
+         'param_strs': param_strs,
+            'word2idx':word2idx,
+            'idx2word':idx2word}
+    pickle.dump(d,  open(save_fn,'w'), protocol=pickle.HIGHEST_PROTOCOL)
+    logging.info("Done with {}".format(save_fn))
 
 if __name__ == '__main__':
     main()
-    
